@@ -11,7 +11,6 @@ from datetime import datetime, timezone, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import formatdate
-from email.message import EmailMessage
 import logging
 import threading
 from typing import Dict, Any, Optional
@@ -59,10 +58,9 @@ EMAIL_CONFIG = {
     "username": "support@locacoeur.com",  # Adresse complète obligatoire
     "password": "86Hqw6O&8i*i",     # Mot de passe de la boîte mail OVH
     "from_email": "support@locacoeur.com",
-    "to_emails": ["chehchehy@gmail.com"],
+    "to_emails": ["berradaadam63@gmail.com"],
     "enabled": True  # Mets à True pour activer l'envoi
 }
-
 
 # Global variables for service control
 running = True
@@ -242,6 +240,13 @@ This is an automated message from the LOCACOEUR MQTT monitoring system.
     def detect_critical_alerts(self, device_serial: str, topic: str, data: Dict[str, Any]) -> None:
         """Detect critical conditions and send alerts"""
         alerts = []
+        critical_alert_messages = ["Defibrillator fault", "Power is cut", "Device is removed"]
+        
+        # Check for alert messages
+        if "alert" in topic.lower():
+            alert_message = data.get("message")
+            if alert_message in critical_alert_messages:
+                alerts.append(f"Critical alert: {alert_message} (ID: {data.get('id')})")
         
         # Check battery level
         battery = data.get("battery")
@@ -258,15 +263,10 @@ This is an automated message from the LOCACOEUR MQTT monitoring system.
         if defibrillator is not None and defibrillator == 0:
             alerts.append("Defibrillator not ready")
         
-        # Check for emergency events
-        if "emergency" in topic.lower() or "alert" in topic.lower():
-            alerts.append(f"Emergency event detected on topic: {topic}")
-        
         # Send alerts if any critical conditions detected
         if alerts:
             alert_message = f"Critical alerts for device {device_serial}:\n" + "\n".join(f"- {alert}" for alert in alerts)
             alert_message += f"\n\nTopic: {topic}\nData: {json.dumps(data, indent=2)}"
-            
             self.send_alert_email(f"Critical Alert - Device {device_serial}", alert_message, "critical")
             logger.warning(f"Critical alerts sent for device {device_serial}: {alerts}")
 
@@ -278,22 +278,24 @@ This is an automated message from the LOCACOEUR MQTT monitoring system.
         
         try:
             cur = conn.cursor()
-            
-            # Parse timestamp properly
             parsed_timestamp = self.parse_timestamp(data.get("timestamp"), device_serial)
-            
-            # Extract location data safely
             location = data.get("location", {})
-            if isinstance(location, dict):
-                latitude = location.get("latitude")
-                longitude = location.get("longitude")
-            else:
-                latitude = longitude = None
+            latitude = location.get("latitude") if isinstance(location, dict) else None
+            longitude = location.get("longitude") if isinstance(location, dict) else None
+            led_power = data.get("led_power")
+            led_defibrillator = data.get("led_defibrillator")
+            alert_id = data.get("id") if "alert" in topic.lower() else None
+            alert_message = data.get("message") if "alert" in topic.lower() else None
             
-            # Check for critical alerts
+            # Update LED states based on alert ID
+            if alert_id == 2:
+                led_power = "red"
+            elif alert_id == 3:
+                led_defibrillator = "red"
+            
+            # Check for critical alerts before inserting
             self.detect_critical_alerts(device_serial, topic, data)
             
-            # Log the data being inserted for debugging
             logger.debug(f"Inserting data for device {device_serial}: timestamp={parsed_timestamp}, topic={topic}")
             
             cur.execute(
@@ -302,9 +304,10 @@ This is an automated message from the LOCACOEUR MQTT monitoring system.
                     device_serial, topic, battery, connection, defibrillator, 
                     latitude, longitude, power_source, timestamp,
                     led_power, led_defibrillator, led_monitoring, led_assistance,
-                    led_mqtt, led_environmental, payload
+                    led_mqtt, led_environmental, alert_id, alert_message, payload,
+                    original_timestamp
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     device_serial,
@@ -315,14 +318,17 @@ This is an automated message from the LOCACOEUR MQTT monitoring system.
                     latitude,
                     longitude,
                     data.get("power_source"),
-                    int(parsed_timestamp.timestamp()),  # Convert to Unix timestamp (bigint)
-                    data.get("led_power"),
-                    data.get("led_defibrillator"),
+                    int(parsed_timestamp.timestamp()),
+                    led_power,
+                    led_defibrillator,
                     data.get("led_monitoring"),
                     data.get("led_assistance"),
                     data.get("led_mqtt"),
                     data.get("led_environmental"),
-                    json.dumps(data)
+                    alert_id,
+                    alert_message,
+                    json.dumps(data),
+                    data.get("timestamp")  # Store original timestamp for debugging
                 )
             )
             conn.commit()
