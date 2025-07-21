@@ -58,7 +58,7 @@ EMAIL_CONFIG = {
     "username": "support@locacoeur.com",  # Adresse complète obligatoire
     "password": "86Hqw6O&8i*i",     # Mot de passe de la boîte mail OVH
     "from_email": "support@locacoeur.com",
-    "to_emails": ["CHEHCHEHY@gmail.com"],
+    "to_emails": ["alertHousse@proton.me"],
     "enabled": True  # Mets à True pour activer l'envoi
 }
 
@@ -80,6 +80,7 @@ def setup_mqtt_client(self):
         tls_version=ssl.PROTOCOL_TLSv1_2
     )
     self.client.username_pw_set(username="locacoeur", password="your_password")
+
 class MQTTService:
     def __init__(self):
         self.client = None
@@ -167,87 +168,62 @@ class MQTTService:
         
         logger.error(f"Failed to send email alert after {max_retries} attempts")
 
-    def parse_timestamp(self, timestamp_value: Any, device_serial: str) -> datetime:
+    def parse_timestamp(self, timestamp_value: Any, device_serial: str, return_unix: bool = False) -> Any:
         """
-        Parse various timestamp formats and return a proper datetime object.
-        Always returns a timezone-aware datetime in UTC.
-        Detects and corrects invalid/placeholder timestamps.
+        Parse various timestamp formats and return a datetime object or Unix timestamp (milliseconds).
+        Always returns a timezone-aware datetime in UTC or milliseconds if return_unix=True.
         """
         current_time = datetime.now(timezone.utc)
-        original_timestamp = timestamp_value
-        
-        # Log original timestamp for debugging
-        timestamp_logger.debug(f"Device {device_serial}: Original timestamp = {original_timestamp} (type: {type(original_timestamp)})")
-        
+        timestamp_logger.debug(f"Device {device_serial}: Original timestamp = {timestamp_value} (type: {type(timestamp_value)})")
+
         if not timestamp_value:
             logger.debug(f"Device {device_serial}: No timestamp provided, using current time")
-            return current_time
-        
+            return int(current_time.timestamp() * 1000) if return_unix else current_time
+
         parsed_dt = None
-        
-        # If timestamp is already a number (Unix timestamp)
         if isinstance(timestamp_value, (int, float)):
             try:
-                # Handle both seconds and milliseconds timestamps
                 if timestamp_value > 1e12:  # Milliseconds
                     timestamp_value = timestamp_value / 1000
                 parsed_dt = datetime.fromtimestamp(timestamp_value, tz=timezone.utc)
             except (ValueError, OSError) as e:
-                logger.warning(f"Device {device_serial}: Invalid Unix timestamp: {original_timestamp}, using current time. Error: {e}")
-                return current_time
-        
-        # If timestamp is a string, try various parsing methods
+                logger.warning(f"Device {device_serial}: Invalid Unix timestamp: {timestamp_value}, using current time. Error: {e}")
+                return int(current_time.timestamp() * 1000) if return_unix else current_time
         elif isinstance(timestamp_value, str):
-            # Try ISO format first
             try:
-                # Handle various ISO formats
                 if timestamp_value.endswith('Z'):
                     parsed_dt = datetime.fromisoformat(timestamp_value.replace('Z', '+00:00'))
                 elif '+' in timestamp_value or timestamp_value.endswith(('00', '30')):
                     parsed_dt = datetime.fromisoformat(timestamp_value)
                 else:
-                    # Assume UTC if no timezone info
                     parsed_dt = datetime.fromisoformat(timestamp_value).replace(tzinfo=timezone.utc)
             except ValueError:
-                logger.warning(f"Device {device_serial}: Failed to parse ISO timestamp: {original_timestamp}")
-            
-            # If ISO parsing failed, try to parse as Unix timestamp string
-            if parsed_dt is None:
                 try:
                     unix_ts = float(timestamp_value)
                     if unix_ts > 1e12:  # Milliseconds
                         unix_ts = unix_ts / 1000
                     parsed_dt = datetime.fromtimestamp(unix_ts, tz=timezone.utc)
                 except (ValueError, OSError):
-                    logger.warning(f"Device {device_serial}: Failed to parse timestamp string as Unix: {original_timestamp}")
-        
-        # If it's a datetime object, ensure it's timezone-aware
+                    logger.warning(f"Device {device_serial}: Failed to parse timestamp string as Unix: {timestamp_value}")
         elif isinstance(timestamp_value, datetime):
             if timestamp_value.tzinfo is None:
                 parsed_dt = timestamp_value.replace(tzinfo=timezone.utc)
             else:
                 parsed_dt = timestamp_value.astimezone(timezone.utc)
-        
-        # If we couldn't parse anything, use current time
+
         if parsed_dt is None:
-            logger.warning(f"Device {device_serial}: Unable to parse timestamp: {original_timestamp} (type: {type(original_timestamp)}), using current time")
-            return current_time
-        
-        # Check for obviously invalid timestamps (too old or too far in the future)
-        min_valid_time = datetime(2024, 1, 1, tzinfo=timezone.utc)  # Don't accept timestamps before 2024
-        max_valid_time = current_time + timedelta(days=1)  # Don't accept timestamps more than 1 day in the future
-        
-        if parsed_dt < min_valid_time:
-            logger.warning(f"Device {device_serial}: Timestamp too old ({parsed_dt}), likely a placeholder. Using current time instead.")
-            timestamp_logger.debug(f"Device {device_serial}: Replaced old timestamp {original_timestamp} -> {current_time}")
-            return current_time
-        elif parsed_dt > max_valid_time:
-            logger.warning(f"Device {device_serial}: Timestamp too far in future ({parsed_dt}), using current time instead.")
-            timestamp_logger.debug(f"Device {device_serial}: Replaced future timestamp {original_timestamp} -> {current_time}")
-            return current_time
-        
-        timestamp_logger.debug(f"Device {device_serial}: Parsed timestamp {original_timestamp} -> {parsed_dt}")
-        return parsed_dt
+            logger.warning(f"Device {device_serial}: Unable to parse timestamp: {timestamp_value} (type: {type(timestamp_value)}), using current time")
+            return int(current_time.timestamp() * 1000) if return_unix else current_time
+
+        min_valid_time = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        max_valid_time = current_time + timedelta(days=1)
+        if parsed_dt < min_valid_time or parsed_dt > max_valid_time:
+            logger.warning(f"Device {device_serial}: Timestamp out of range ({parsed_dt}), using current time.")
+            timestamp_logger.debug(f"Device {device_serial}: Replaced out-of-range timestamp {timestamp_value} -> {current_time}")
+            return int(current_time.timestamp() * 1000) if return_unix else current_time
+
+        timestamp_logger.debug(f"Device {device_serial}: Parsed timestamp {timestamp_value} -> {parsed_dt}")
+        return int(parsed_dt.timestamp() * 1000) if return_unix else parsed_dt
 
     def detect_critical_alerts(self, device_serial: str, topic: str, data: Dict[str, Any]) -> None:
         """Detect critical conditions and send alerts"""
@@ -288,6 +264,84 @@ class MQTTService:
             logger.warning(f"Critical alerts sent for device {device_serial}: {alerts}")
         else:
             logger.debug(f"No critical alerts detected for device {device_serial} on topic {topic}")
+    
+    def insert_device_data(self, device_serial: str, topic: str, data: Dict[str, Any]) -> None:
+        """Insert data into the device_data table."""
+        conn = self.connect_db()
+        if not conn:
+            return
+        try:
+            cur = conn.cursor()
+            parsed_timestamp = self.parse_timestamp(data.get("timestamp"), device_serial, return_unix=True)
+            payload_str = json.dumps(data, sort_keys=True)
+
+            # Validate required fields
+            if not device_serial or not topic:
+                logger.error(f"Missing device_serial or topic in data: {data}")
+                self.send_alert_email(
+                    "Invalid Data",
+                    f"Missing device_serial or topic for device {device_serial} on topic {topic}",
+                    "warning"
+                )
+                return
+
+            # Validate defibrillator value
+            defibrillator = data.get("defibrillator")
+            if defibrillator is not None and (not isinstance(defibrillator, int) or defibrillator < 0):
+                logger.warning(f"Invalid defibrillator value for device {device_serial}: {defibrillator}. Setting to None.")
+                defibrillator = None
+                self.send_alert_email(
+                    "Invalid Data Warning",
+                    f"Device {device_serial} sent invalid defibrillator value: {defibrillator}. Set to None.",
+                    "warning"
+                )
+
+            cur.execute(
+                """
+                INSERT INTO device_data (
+                    device_serial, topic, battery, connection, defibrillator,
+                    latitude, longitude, power_source, timestamp,
+                    led_power, led_defibrillator, led_monitoring, led_assistance,
+                    led_mqtt, led_environmental, payload, alert_id, alert_message,
+                    original_timestamp
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    device_serial,
+                    topic,
+                    data.get("battery"),
+                    data.get("connection"),
+                    defibrillator,
+                    data.get("latitude"),
+                    data.get("longitude"),
+                    data.get("power_source"),
+                    parsed_timestamp,
+                    data.get("led_power"),
+                    data.get("led_defibrillator"),
+                    data.get("led_monitoring"),
+                    data.get("led_assistance"),
+                    data.get("led_mqtt"),
+                    data.get("led_environmental"),
+                    payload_str,
+                    data.get("id") if "alert" in topic.lower() else None,
+                    data.get("message") if "alert" in topic.lower() else None,
+                    data.get("timestamp") if isinstance(data.get("timestamp"), (int, float)) else None
+                )
+            )
+            conn.commit()
+            logger.info(f"Inserted into device_data for device {device_serial} on topic {topic}")
+        except Exception as e:
+            logger.error(f"Error inserting into device_data for device {device_serial}: {e}")
+            conn.rollback()
+            self.send_alert_email(
+                "Device Data Insertion Error",
+                f"Failed to insert into device_data for device {device_serial} on topic {topic}: {e}",
+                "critical"
+            )
+        finally:
+            cur.close()
+            conn.close()
 
     def insert_data(self, device_serial: str, topic: str, data: Dict[str, Any]) -> None:
         """Insert data into the database based on MQTT topic"""
@@ -313,21 +367,6 @@ class MQTTService:
                     f"Device {device_serial} sent invalid defibrillator value: {defibrillator}. Set to None.",
                     "warning"
                 )
-
-            # Check for duplicate event
-            if topic_category == "event":
-                cur.execute(
-                    """
-                    SELECT event_id FROM Events
-                    WHERE device_serial = %s AND topic = %s AND payload = %s
-                    AND created_at >= %s
-                    """,
-                    (device_serial, topic, payload_str, datetime.now(timezone.utc) - timedelta(minutes=5))
-                )
-                if cur.fetchone():
-                    logger.info(f"Duplicate event detected for device {device_serial} on topic {topic}. Skipping insert.")
-                    conn.commit()
-                    return
 
             # Get server_id for production environment
             server_id = None
@@ -369,26 +408,44 @@ class MQTTService:
             # Handle Events (LC1/{serial}/event/#)
             if topic_category == "event":
                 message_id = operation_id
-                cur.execute(
-                    """
-                    INSERT INTO Events (
-                        device_serial, server_id, operation_id, topic, message_id, 
-                        payload, event_timestamp, created_at, original_timestamp
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO Events (
+                            device_serial, server_id, operation_id, topic, message_id, 
+                            payload, event_timestamp, created_at, original_timestamp
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (device_serial, topic, payload, event_timestamp) DO UPDATE SET
+                            created_at = EXCLUDED.created_at,
+                            original_timestamp = EXCLUDED.original_timestamp
+                        """,
+                        (
+                            device_serial,
+                            server_id,
+                            message_id,
+                            topic,
+                            message_id,
+                            payload_str,
+                            parsed_timestamp,
+                            datetime.now(timezone.utc),
+                            str(data.get("timestamp"))
+                        )
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        device_serial,
-                        server_id,
-                        message_id,
-                        topic,
-                        message_id,
-                        payload_str,
-                        parsed_timestamp,
-                        datetime.now(timezone.utc),
-                        str(data.get("timestamp"))
-                    )
-                )
+                    
+                    # Check if this was an insert or update
+                    if cur.rowcount > 0:
+                        logger.debug(f"Event processed for device {device_serial} on topic {topic}")
+                    else:
+                        logger.debug(f"Duplicate event ignored for device {device_serial} on topic {topic}")
+                        
+                except psycopg2.IntegrityError as e:
+                    if "unique_event" in str(e):
+                        logger.debug(f"Duplicate event skipped for device {device_serial} on topic {topic}")
+                        # Don't rollback, just continue
+                    else:
+                        # Re-raise if it's a different integrity error
+                        raise
 
                 # Update LEDs table
                 led_updates = {}
@@ -443,62 +500,84 @@ class MQTTService:
             # Handle Commands (LC1/{serial}/command/#)
             elif topic_category == "command":
                 message_id = operation_id
-                cur.execute(
-                    """
-                    INSERT INTO Commands (
-                        device_serial, server_id, operation_id, topic, message_id, payload, created_at
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO Commands (
+                            device_serial, server_id, operation_id, topic, message_id, payload, created_at
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            device_serial,
+                            server_id,
+                            message_id,
+                            topic,
+                            message_id,
+                            payload_str,
+                            datetime.now(timezone.utc)
+                        )
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        device_serial,
-                        server_id,
-                        message_id,
-                        topic,
-                        message_id,
-                        payload_str,
-                        datetime.now(timezone.utc)
-                    )
-                )
+                except psycopg2.IntegrityError as e:
+                    logger.debug(f"Duplicate command skipped for device {device_serial} on topic {topic}")
+                    # Don't rollback, just continue
 
             # Handle Results (LC1/{serial}/result)
             elif topic_category == "result":
                 result_status = data.get("status", "Success")
                 result_message = data.get("message")
-                cur.execute(
-                    """
-                    SELECT command_id FROM Commands
-                    WHERE device_serial = %s
-                    ORDER BY created_at DESC LIMIT 1
-                    """,
-                    (device_serial,)
-                )
-                command_id = cur.fetchone()[0] if cur.rowcount > 0 else None
-
-                cur.execute(
-                    """
-                    INSERT INTO Results (
-                        command_id, device_serial, topic, result_status, result_message, payload, created_at
+                try:
+                    cur.execute(
+                        """
+                        SELECT command_id FROM Commands
+                        WHERE device_serial = %s
+                        ORDER BY created_at DESC LIMIT 1
+                        """,
+                        (device_serial,)
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        command_id,
-                        device_serial,
-                        topic,
-                        result_status,
-                        result_message,
-                        payload_str,
-                        datetime.now(timezone.utc)
-                    )
-                )
+                    command_id = cur.fetchone()[0] if cur.rowcount > 0 else None
 
-            # Check for critical alerts
-            self.detect_critical_alerts(device_serial, topic, data)
+                    cur.execute(
+                        """
+                        INSERT INTO Results (
+                            command_id, device_serial, topic, result_status, result_message, payload, created_at
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            command_id,
+                            device_serial,
+                            topic,
+                            result_status,
+                            result_message,
+                            payload_str,
+                            datetime.now(timezone.utc)
+                        )
+                    )
+                except psycopg2.IntegrityError as e:
+                    logger.debug(f"Duplicate result skipped for device {device_serial} on topic {topic}")
+                    # Don't rollback, just continue
+
+            # Check for critical alerts (only for new events, not duplicates)
+            if topic_category == "event":
+                self.detect_critical_alerts(device_serial, topic, data)
 
             conn.commit()
-            logger.info(f"Data inserted for device {device_serial} from topic {topic} with timestamp {parsed_timestamp}")
+            logger.info(f"Data processed for device {device_serial} from topic {topic} with timestamp {parsed_timestamp}")
 
+        except psycopg2.IntegrityError as e:
+            if "duplicate key value violates unique constraint" in str(e):
+                logger.debug(f"Duplicate record skipped for device {device_serial} on topic {topic}")
+                # Don't send alert email for duplicates
+                conn.rollback()
+            else:
+                logger.error(f"Database integrity error for device {device_serial}: {e}")
+                conn.rollback()
+                self.send_alert_email(
+                    "Database Integrity Error",
+                    f"Database integrity error for device {device_serial} on topic {topic}: {e}",
+                    "critical"
+                )
         except Exception as e:
             logger.error(f"Database error for device {device_serial}: {e}")
             conn.rollback()

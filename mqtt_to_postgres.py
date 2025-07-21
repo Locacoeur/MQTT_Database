@@ -58,7 +58,7 @@ EMAIL_CONFIG = {
     "username": "support@locacoeur.com",  # Adresse complète obligatoire
     "password": "86Hqw6O&8i*i",     # Mot de passe de la boîte mail OVH
     "from_email": "support@locacoeur.com",
-    "to_emails": ["berradaadam63@gmail.com"],
+    "to_emails": ["chechech@gmail.com"],
     "enabled": True  # Mets à True pour activer l'envoi
 }
 
