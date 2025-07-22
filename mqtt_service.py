@@ -113,47 +113,45 @@ class MQTTService:
     logger = logging.getLogger(__name__)
 
     def get_server_id(self) -> int:
-        """Retrieve or create server_id for the current MQTT broker"""
+        """Retrieve or create server_id for the current server"""
         conn = self.connect_db()
         if not conn:
             logger.error("Failed to connect to database for server_id retrieval")
             return None
         try:
             cur = conn.cursor()
-            mqtt_broker_url = "mqtts://mqtt.locacoeur.com:8883"
-            server_name = "locacoeur-mqtt-server"
-
-            # Check if server exists
+            # Check for default server_id=1
             cur.execute(
                 """
                 SELECT server_id FROM Servers
-                WHERE mqtt_broker_url = %s
-                """,
-                (mqtt_broker_url,)
+                WHERE server_id = 1
+                """
             )
             result = cur.fetchone()
             if result:
                 return result[0]
 
-            # Insert new server if not exists
+            # Insert default server if not exists
             cur.execute(
                 """
-                INSERT INTO Servers (server_name, mqtt_broker_url, created_at)
-                VALUES (%s, %s, %s)
+                INSERT INTO Servers (server_id, created_at)
+                VALUES (1, %s)
+                ON CONFLICT (server_id) DO NOTHING
                 RETURNING server_id
                 """,
-                (server_name[:50], mqtt_broker_url[:255], datetime.now())
+                (datetime.now(),)
             )
-            server_id = cur.fetchone()[0]
+            result = cur.fetchone()
+            server_id = result[0] if result else 1
             conn.commit()
-            logger.info(f"Created new server entry for {mqtt_broker_url} with server_id {server_id}")
+            logger.info(f"Created default server entry with server_id {server_id}")
             return server_id
         except Exception as e:
             logger.error(f"Error retrieving or creating server_id: {e}")
             conn.rollback()
             self.send_alert_email(
                 "Database Error",
-                f"Failed to retrieve or create server_id for {mqtt_broker_url}: {e}",
+                f"Failed to retrieve or create server_id: {e}",
                 "critical"
             )
             return None
@@ -567,7 +565,7 @@ class MQTTService:
                         "warning"
                     )
                     return
-                valid_leds = {"Green", "Red", "Off"} if led_environmental else {"Green", "Red"}
+                valid_leds = {"Green", "Red", "Off"} if led_environmental is not None else {"Green", "Red"}
                 for led, value in [
                     ("Power", led_power),
                     ("Defibrillator", led_defibrillator),
@@ -618,7 +616,7 @@ class MQTTService:
                     ("MQTT", led_mqtt),
                     ("Environmental", led_environmental)
                 ]:
-                    if status is not None and status in valid_leds:
+                    if status is not None:
                         cur.execute(
                             """
                             INSERT INTO LEDs (device_serial, led_type, status, last_updated)
@@ -690,7 +688,7 @@ class MQTTService:
         finally:
             cur.close()
             self.release_db(conn)
-    
+        
     def insert_version_data(self, device_serial: str, topic: str, data: Dict[str, Any]) -> None:
         """Insert version data into the Events table"""
         conn = self.connect_db()
