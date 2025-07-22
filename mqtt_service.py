@@ -120,31 +120,46 @@ class MQTTService:
             return None
         try:
             cur = conn.cursor()
-            # Check for default server_id=1
+            # Check for server with environment='production' and mqtt_url
+            mqtt_url = "mqtts://mqtt.locacoeur.com:8883"
             cur.execute(
                 """
                 SELECT server_id FROM Servers
-                WHERE server_id = 1
-                """
+                WHERE environment = %s AND mqtt_url = %s
+                """,
+                ("production", mqtt_url)
             )
             result = cur.fetchone()
             if result:
                 return result[0]
 
-            # Insert default server if not exists
+            # Insert new server if not exists
             cur.execute(
                 """
-                INSERT INTO Servers (server_id, created_at)
-                VALUES (1, %s)
-                ON CONFLICT (server_id) DO NOTHING
+                INSERT INTO Servers (environment, mqtt_url)
+                VALUES (%s, %s)
+                ON CONFLICT (environment) DO NOTHING
                 RETURNING server_id
                 """,
-                (datetime.now(),)
+                ("production", mqtt_url)
             )
             result = cur.fetchone()
-            server_id = result[0] if result else 1
+            server_id = result[0] if result else None
+            if server_id is None:
+                # Fetch server_id if insert failed due to conflict
+                cur.execute(
+                    """
+                    SELECT server_id FROM Servers
+                    WHERE environment = %s AND mqtt_url = %s
+                    """,
+                    ("production", mqtt_url)
+                )
+                result = cur.fetchone()
+                server_id = result[0] if result else None
+            if server_id is None:
+                raise ValueError("Failed to retrieve or create server_id")
             conn.commit()
-            logger.info(f"Created default server entry with server_id {server_id}")
+            logger.info(f"Created or retrieved server_id {server_id} for environment='production'")
             return server_id
         except Exception as e:
             logger.error(f"Error retrieving or creating server_id: {e}")
@@ -168,8 +183,10 @@ class MQTTService:
             cur = conn.cursor()
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS Servers (
-                    server_id INTEGER PRIMARY KEY,
-                    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                    server_id SERIAL PRIMARY KEY,
+                    environment TEXT NOT NULL,
+                    mqtt_url TEXT NOT NULL,
+                    UNIQUE (environment)
                 );
                 CREATE TABLE IF NOT EXISTS Devices (
                     serial VARCHAR(50) PRIMARY KEY,
@@ -210,11 +227,14 @@ class MQTTService:
                     original_timestamp TEXT
                 );
                 CREATE TABLE IF NOT EXISTS LEDs (
+                    led_id SERIAL PRIMARY KEY,
                     device_serial VARCHAR(50) REFERENCES Devices(serial) ON DELETE CASCADE,
-                    led_type VARCHAR(50),
-                    status VARCHAR(50),
+                    led_type VARCHAR(50) NOT NULL,
+                    status VARCHAR(50) NOT NULL,
+                    description TEXT,
                     last_updated TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (device_serial, led_type)
+                    CONSTRAINT leds_status_check CHECK (status IN ('Green', 'Red', 'Off')),
+                    UNIQUE (device_serial, led_type)
                 );
                 CREATE TABLE IF NOT EXISTS device_data (
                     id SERIAL PRIMARY KEY,
@@ -480,12 +500,14 @@ class MQTTService:
             cur.close()
             self.release_db(conn)
     
+
     logger = logging.getLogger(__name__)
 
     def insert_device_data(self, device_serial: str, topic: str, data: Dict[str, Any]) -> None:
         """Insert device data into the device_data table"""
         conn = self.connect_db()
         if not conn:
+            logger.error("Failed to connect to database")
             return
         try:
             cur = conn.cursor()
@@ -501,6 +523,7 @@ class MQTTService:
                 return
 
             # Insert into Devices if not exists
+            logger.debug(f"Inserting device {device_serial} into Devices table")
             cur.execute(
                 """
                 INSERT INTO Devices (serial, mqtt_broker_url)
@@ -514,6 +537,7 @@ class MQTTService:
             if topic.endswith("/event/location"):
                 latitude = data.get("latitude")
                 longitude = data.get("longitude")
+                logger.debug(f"Processing location event for {device_serial}: latitude={latitude}, longitude={longitude}")
                 if not isinstance(latitude, (int, float)) or not isinstance(longitude, (int, float)):
                     logger.error(f"Invalid location data types for device {device_serial}: latitude={latitude}, longitude={longitude}")
                     self.send_alert_email(
@@ -557,6 +581,10 @@ class MQTTService:
                 led_assistance = data.get("led_assistance")
                 led_mqtt = data.get("led_mqtt")
                 led_environmental = data.get("led_environmental")
+                logger.debug(f"Processing status event for {device_serial}: battery={battery}, "
+                            f"led_power={led_power}, led_defibrillator={led_defibrillator}, "
+                            f"led_monitoring={led_monitoring}, led_assistance={led_assistance}, "
+                            f"led_mqtt={led_mqtt}, led_environmental={led_environmental}")
                 if battery is not None and (not isinstance(battery, int) or not 0 <= battery <= 100):
                     logger.error(f"Invalid battery value for device {device_serial}: {battery}")
                     self.send_alert_email(
@@ -565,7 +593,7 @@ class MQTTService:
                         "warning"
                     )
                     return
-                valid_leds = {"Green", "Red", "Off"} if led_environmental is not None else {"Green", "Red"}
+                valid_leds = {"Green", "Red", "Off"}
                 for led, value in [
                     ("Power", led_power),
                     ("Defibrillator", led_defibrillator),
@@ -582,6 +610,12 @@ class MQTTService:
                             "warning"
                         )
                         return
+                logger.debug(f"Inserting into device_data for {device_serial}: battery={battery}, "
+                            f"led_power={led_power}, led_defibrillator={led_defibrillator}, "
+                            f"led_monitoring={led_monitoring}, led_assistance={led_assistance}, "
+                            f"led_mqtt={led_mqtt}, led_environmental={led_environmental}")
+                
+                # FIXED: Added the missing 13th placeholder (%s) to match 13 parameters
                 cur.execute(
                     """
                     INSERT INTO device_data (
@@ -589,43 +623,48 @@ class MQTTService:
                         led_monitoring, led_assistance, led_mqtt, led_environmental,
                         timestamp, original_timestamp, received_at, payload
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         device_serial[:50],
                         topic[:255],
                         battery,
-                        led_power[:50] if led_power else None,
-                        led_defibrillator[:50] if led_defibrillator else None,
-                        led_monitoring[:50] if led_monitoring else None,
-                        led_assistance[:50] if led_assistance else None,
-                        led_mqtt[:50] if led_mqtt else None,
-                        led_environmental[:50] if led_environmental else None,
+                        led_power if led_power else None,
+                        led_defibrillator if led_defibrillator else None,
+                        led_monitoring if led_monitoring else None,
+                        led_assistance if led_assistance else None,
+                        led_mqtt if led_mqtt else None,
+                        led_environmental if led_environmental else None,
                         timestamp,
                         timestamp,
                         datetime.now(),
                         payload_str
                     )
                 )
+                
                 # Update LEDs table for non-None values
-                for led_type, status in [
+                led_values = [
                     ("Power", led_power),
                     ("Defibrillator", led_defibrillator),
                     ("Monitoring", led_monitoring),
                     ("Assistance", led_assistance),
                     ("MQTT", led_mqtt),
                     ("Environmental", led_environmental)
-                ]:
+                ]
+                for led_type, status in led_values:
                     if status is not None:
+                        logger.debug(f"Preparing LED insert: device={device_serial}, type={led_type}, status={status}")
                         cur.execute(
                             """
-                            INSERT INTO LEDs (device_serial, led_type, status, last_updated)
-                            VALUES (%s, %s, %s, %s)
+                            INSERT INTO LEDs (device_serial, led_type, status, description, last_updated)
+                            VALUES (%s, %s, %s, %s, %s)
                             ON CONFLICT (device_serial, led_type)
-                            DO UPDATE SET status = EXCLUDED.status, last_updated = EXCLUDED.last_updated
+                            DO UPDATE SET status = EXCLUDED.status, description = EXCLUDED.description, last_updated = EXCLUDED.last_updated
                             """,
-                            (device_serial[:50], led_type, status, datetime.now())
+                            (device_serial[:50], led_type, status, None, datetime.now())
                         )
+                        logger.debug(f"Inserted LED: device={device_serial}, type={led_type}, status={status}")
+                
                 # Check for critical conditions
                 if battery is not None and battery < 20:
                     self.send_alert_email(
@@ -642,6 +681,7 @@ class MQTTService:
             elif topic.endswith("/event/alert"):
                 alert_id = data.get("id")
                 alert_message = data.get("message")
+                logger.debug(f"Processing alert event for {device_serial}: alert_id={alert_id}, alert_message={alert_message}")
                 if not isinstance(alert_id, int):
                     logger.error(f"Invalid alert_id for device {device_serial}: {alert_id}")
                     self.send_alert_email(
@@ -674,8 +714,10 @@ class MQTTService:
                     f"Alert for device {device_serial}: {alert_message}",
                     "critical"
                 )
+            
             conn.commit()
             logger.info(f"Inserted into device_data for device {device_serial} on topic {topic}")
+            
         except Exception as e:
             logger.error(f"Database error for device {device_serial}: {e}")
             conn.rollback()
