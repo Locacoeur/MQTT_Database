@@ -224,7 +224,8 @@ class MQTTService:
                     payload JSONB,
                     event_timestamp TIMESTAMP WITHOUT TIME ZONE,
                     created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    original_timestamp TEXT
+                    original_timestamp TEXT,
+                    UNIQUE (device_serial, topic, event_timestamp)
                 );
                 CREATE TABLE IF NOT EXISTS LEDs (
                     led_id SERIAL PRIMARY KEY,
@@ -735,21 +736,16 @@ class MQTTService:
         """Insert version data into the Events table"""
         conn = self.connect_db()
         if not conn:
+            logger.error("Failed to connect to database")
             return
         try:
             cur = conn.cursor()
-            payload_str = json.dumps(data, sort_keys=True)
             server_id = self.get_server_id()
             if server_id is None:
-                logger.error(f"No server_id found for device {device_serial}")
-                self.send_alert_email(
-                    "Database Error",
-                    f"No server_id found for device {device_serial} on topic {topic}",
-                    "critical"
-                )
+                logger.error(f"Failed to get server_id for device {device_serial}")
                 return
-
-            timestamp = self.parse_timestamp(data.get("timestamp"), device_serial)
+            payload_str = json.dumps(data, sort_keys=True)
+            timestamp = self.parse_timestamp(data.get("timestamp"), device_serial, return_unix=False)
             if timestamp is None:
                 logger.error(f"Invalid timestamp for device {device_serial} on topic {topic}")
                 self.send_alert_email(
@@ -758,39 +754,38 @@ class MQTTService:
                     "warning"
                 )
                 return
-
-            operation_id = "version"
-            message_id = data.get("message_id", str(uuid.uuid4()))[:50]
-
-            # Insert into Devices if not exists
-            cur.execute(
-                """
-                INSERT INTO Devices (serial, mqtt_broker_url)
-                VALUES (%s, %s)
-                ON CONFLICT (serial) DO NOTHING
-                """,
-                (device_serial[:50], "mqtts://mqtt.locacoeur.com:8883")
-            )
-
-            # Insert into Events
+            version = data.get("version")
+            if not isinstance(version, str):
+                logger.error(f"Invalid version for device {device_serial}: {version}")
+                self.send_alert_email(
+                    "Invalid Version Data",
+                    f"Invalid version for device {device_serial}: {version}",
+                    "warning"
+                )
+                return
+            logger.debug(f"Inserting version event for {device_serial}: version={version}")
             cur.execute(
                 """
                 INSERT INTO Events (
-                    device_serial, server_id, operation_id, topic, message_id,
-                    payload, event_timestamp, created_at, original_timestamp
+                    device_serial, server_id, operation_id, topic, payload,
+                    event_timestamp, created_at, original_timestamp
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (device_serial, topic, event_timestamp)
+                DO UPDATE SET
+                    payload = EXCLUDED.payload,
+                    created_at = EXCLUDED.created_at,
+                    original_timestamp = EXCLUDED.original_timestamp
                 """,
                 (
                     device_serial[:50],
                     server_id,
-                    operation_id[:50],
+                    "version",
                     topic[:255],
-                    message_id,
                     payload_str,
-                    timestamp if isinstance(timestamp, datetime) else datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc),
-                    datetime.now(),  # TIMESTAMP WITHOUT TIME ZONE
-                    str(data.get("timestamp"))
+                    timestamp,
+                    datetime.now(),
+                    data.get("timestamp")
                 )
             )
             conn.commit()
@@ -803,6 +798,7 @@ class MQTTService:
                 f"Failed to insert version data for device {device_serial} on topic {topic}: {e}",
                 "critical"
             )
+            return
         finally:
             cur.close()
             self.release_db(conn)
@@ -811,21 +807,16 @@ class MQTTService:
         """Insert log data into the Events table"""
         conn = self.connect_db()
         if not conn:
+            logger.error("Failed to connect to database")
             return
         try:
             cur = conn.cursor()
-            payload_str = json.dumps(data, sort_keys=True)
             server_id = self.get_server_id()
             if server_id is None:
-                logger.error(f"No server_id found for device {device_serial}")
-                self.send_alert_email(
-                    "Database Error",
-                    f"No server_id found for device {device_serial} on topic {topic}",
-                    "critical"
-                )
+                logger.error(f"Failed to get server_id for device {device_serial}")
                 return
-
-            timestamp = self.parse_timestamp(data.get("timestamp"), device_serial)
+            payload_str = json.dumps(data, sort_keys=True)
+            timestamp = self.parse_timestamp(data.get("timestamp"), device_serial, return_unix=False)
             if timestamp is None:
                 logger.error(f"Invalid timestamp for device {device_serial} on topic {topic}")
                 self.send_alert_email(
@@ -834,39 +825,38 @@ class MQTTService:
                     "warning"
                 )
                 return
-
-            operation_id = "log"
-            message_id = data.get("message_id", str(uuid.uuid4()))[:50]
-
-            # Insert into Devices if not exists
-            cur.execute(
-                """
-                INSERT INTO Devices (serial, mqtt_broker_url)
-                VALUES (%s, %s)
-                ON CONFLICT (serial) DO NOTHING
-                """,
-                (device_serial[:50], "mqtts://mqtt.locacoeur.com:8883")
-            )
-
-            # Insert into Events
+            log_message = data.get("log_message")
+            if not isinstance(log_message, str):
+                logger.error(f"Invalid log_message for device {device_serial}: {log_message}")
+                self.send_alert_email(
+                    "Invalid Log Data",
+                    f"Invalid log_message for device {device_serial}: {log_message}",
+                    "warning"
+                )
+                return
+            logger.debug(f"Inserting log event for {device_serial}: log_message={log_message}")
             cur.execute(
                 """
                 INSERT INTO Events (
-                    device_serial, server_id, operation_id, topic, message_id,
-                    payload, event_timestamp, created_at, original_timestamp
+                    device_serial, server_id, operation_id, topic, payload,
+                    event_timestamp, created_at, original_timestamp
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (device_serial, topic, event_timestamp)
+                DO UPDATE SET
+                    payload = EXCLUDED.payload,
+                    created_at = EXCLUDED.created_at,
+                    original_timestamp = EXCLUDED.original_timestamp
                 """,
                 (
                     device_serial[:50],
                     server_id,
-                    operation_id[:50],
+                    "log",
                     topic[:255],
-                    message_id,
                     payload_str,
-                    timestamp if isinstance(timestamp, datetime) else datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc),
-                    datetime.now(),  # TIMESTAMP WITHOUT TIME ZONE
-                    str(data.get("timestamp"))
+                    timestamp,
+                    datetime.now(),
+                    data.get("timestamp")
                 )
             )
             conn.commit()
@@ -879,6 +869,7 @@ class MQTTService:
                 f"Failed to insert log data for device {device_serial} on topic {topic}: {e}",
                 "critical"
             )
+            return
         finally:
             cur.close()
             self.release_db(conn)
